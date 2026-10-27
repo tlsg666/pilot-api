@@ -1,0 +1,11 @@
+config:
+  name: "登录异常用例"
+  base_url: "http://127.0.0.1:8000"
+teststeps:
+  - name: "密码错误登录"
+    request:
+      method: POST
+      url: "/api/login"
+      json: { email: "test@test.com", password: "wrong_password" }
+    validate:
+      - eq: [status_code, 401]

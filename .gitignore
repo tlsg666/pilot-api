@@ -1,0 +1,15 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# pycharm
+.idea/
+
+# hrp 运行产物（报告 + 每次运行的独占目录 + 插件生成物）
+demo/runs/
+demo/results/
+demo/.debugtalk_gen.py
+demo/debugtalk.bin
+demo/debugtalk.so

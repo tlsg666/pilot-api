@@ -1,0 +1,16 @@
+config:
+  name: "下单用例"
+  base_url: "http://127.0.0.1:8000"
+  variables:
+    fake_token: "this_is_a_fake_token_123456789"
+teststeps:
+  - name: "创建订单"
+    request:
+      method: POST
+      url: "/api/order"
+      headers:
+        token: $fake_token
+      json: { item_id: 1 }
+    validate:
+      - eq: [status_code, 200]
+      - eq: [body.data.order_id, "ORD-999"]

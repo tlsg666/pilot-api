@@ -1,0 +1,17 @@
+config:
+  name: "查询列表"
+  base_url: "http://127.0.0.1:8000"
+  variables:
+    # 这里演示造数法：直接拿登录后拿到的那个固定 token
+    fake_token: "this_is_a_fake_token_123456789"
+teststeps:
+  - name: "带 Token 查询"
+    request:
+      method: GET
+      url: "/api/list"
+      headers:
+        token: $fake_token
+      params: { page: 2 }
+    validate:
+      - eq: [status_code, 200]
+      - eq: [body.data.page, 2]

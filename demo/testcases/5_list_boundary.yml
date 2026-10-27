@@ -1,0 +1,15 @@
+config:
+  name: "分页边界用例"
+  base_url: "http://127.0.0.1:8000"
+  variables:
+    fake_token: "this_is_a_fake_token_123456789"
+teststeps:
+  - name: "查询第999页"
+    request:
+      method: GET
+      url: "/api/list"
+      headers:
+        token: $fake_token
+      params: { page: 999 }
+    validate:
+      - eq: [status_code, 200]

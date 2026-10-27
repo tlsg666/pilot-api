@@ -1,0 +1,18 @@
+config:
+  name: "登录用例"
+  base_url: "${ENV(base_url)}"  # 从 .env 读取
+
+teststeps:
+  - name: "正常登录"
+    request:
+      method: POST
+      url: "/api/login"
+      json:
+        email: "qa@example.com"
+        password: "123456"
+    extract:
+      my_token: body.data.token    # 改成 body
+    validate:
+      - eq: [status_code, 200]
+      - eq: [body.code, 0]
+      - len_eq: [body.data.token, 30] # 加上长度断言
