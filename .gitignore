@@ -13,3 +13,4 @@ demo/results/
 demo/.debugtalk_gen.py
 demo/debugtalk.bin
 demo/debugtalk.so
+platform.db*

@@ -1,53 +1,42 @@
-"""Stage 3 · 服务化：提交即返回 run_id，轮询看进度。
+"""Stage 4 · 队列 + 4 并发 worker + 单用例超时 + SQLite 持久化 + 中断恢复。
 
-三态状态机：queued → running → finished（Stage 4 会加 interrupted）
-存储先用内存（Stage 4 换 SQLite），但读写一律加锁。
+接口契约和 Stage 3 保持一致（POST /runs、GET /runs、GET /runs/{id}），
+换掉的是内部：内存 dict → SQLite；线程池 → 显式队列 + worker 线程；队列粒度 run → case。
 """
 from __future__ import annotations
 
+import os
+import queue
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 import runner
+import store
 
 BASE_DIR = Path(__file__).resolve().parent
-DEMO_DIR = BASE_DIR / "demo"          # hrp 工程根：.env / proj.json / testcases 都在这
-MAX_WORKERS = 4                       # 全局并发上限：同时最多 4 个 hrp 进程
+DEMO_DIR = BASE_DIR / "demo"
 
-app = FastAPI(title="接口测试平台", version="0.3")
+MAX_WORKERS = int(os.environ.get("PLATFORM_WORKERS", "4"))
+DEFAULT_TIMEOUT = int(os.environ.get("PLATFORM_CASE_TIMEOUT", "120"))
+
+app = FastAPI(title="接口测试平台", version="0.4")
+
+QUEUE: "queue.Queue" = queue.Queue()          # 队列粒度：一条用例一个任务
+_REMAINING: dict[str, int] = {}               # run_id -> 还剩几条没跑完
+_STATE_LOCK = threading.Lock()
+_WORKERS: list[threading.Thread] = []
 
 
 class RunReq(BaseModel):
-    cases: list[str] = Field(..., min_length=1, description="用例文件名，如 1_login.yml")
-    request_id: str | None = Field(default=None, description="客户端幂等键，重试不会重复执行")
-
-
-class RunState(BaseModel):
-    id: str
-    status: Literal["queued", "running", "finished"]
-    total: int
-    finished: int = 0
-    passed: int = 0
-    failed: int = 0
-    error: int = 0
-    current: str | None = None
-    started_at: str = ""
-    finished_at: str | None = None
-    results: list[dict] = Field(default_factory=list)
-
-
-RUNS: dict[str, RunState] = {}         # run_id -> 状态
-CLIENT_KEYS: dict[str, str] = {}       # request_id -> run_id（幂等）
-LOCK = threading.Lock()                # 多线程写同一份字典，必须加锁
-EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="hrp-run")
+    cases: list[str] = Field(..., min_length=1)
+    request_id: str | None = None             # 幂等键
+    case_timeout: int = Field(default=DEFAULT_TIMEOUT, ge=1, le=3600)
 
 
 def _now() -> str:
@@ -55,7 +44,6 @@ def _now() -> str:
 
 
 def _resolve_case(name: str) -> Path:
-    """允许传 '1_login.yml' 或 'testcases/1_login.yml'，在 demo 下找得到就行。"""
     p = Path(name)
     for cand in ([p] if p.is_absolute() else [DEMO_DIR / p, DEMO_DIR / "testcases" / p]):
         if cand.is_file():
@@ -63,74 +51,88 @@ def _resolve_case(name: str) -> Path:
     raise HTTPException(status_code=400, detail=f"用例不存在：{name}")
 
 
-def _execute(run_id: str, cases: list[Path]) -> None:
-    """在 worker 线程里顺序跑完这个 run 的所有用例。"""
-    with LOCK:
-        RUNS[run_id].status = "running"
-        RUNS[run_id].started_at = _now()
+def _worker(name: str) -> None:
+    """一个 worker 就是一条死循环：取任务 → 跑 → 记录 → 判断整个 run 是否跑完。"""
+    while True:
+        task = QUEUE.get()
+        if task is None:                      # 哨兵：优雅退出
+            QUEUE.task_done()
+            return
 
-    for i, case in enumerate(cases, start=1):
-        with LOCK:
-            RUNS[run_id].current = case.name
+        run_id, seq, label, path, timeout = task
+        left = None
+        try:
+            store.mark_running(run_id)        # 只有第一次会真的改（WHERE status='queued'）
+            res = runner.run_case(path, DEMO_DIR, timeout=timeout)
+            store.add_result(run_id, seq, label, path.name, res)
+        except Exception as e:                # worker 绝不能死：单条用例出错只记 error
+            store.add_result(run_id, seq, label, path.name,
+                             runner.CaseResult(case=label, status=runner.ERROR,
+                                               message=f"worker 异常：{e}"))
+        finally:
+            with _STATE_LOCK:
+                left = _REMAINING.get(run_id, 1) - 1
+                if left <= 0:
+                    _REMAINING.pop(run_id, None)
+                else:
+                    _REMAINING[run_id] = left
+            if left <= 0:
+                store.finish_run(run_id)
+            QUEUE.task_done()
 
-        res = runner.run_case(case, DEMO_DIR)      # 阻塞调用，跑在线程里没问题
 
-        with LOCK:
-            st = RUNS[run_id]
-            st.results.append(res.as_dict())
-            st.finished = i
-            if res.status == runner.PASSED:
-                st.passed += 1
-            elif res.status == runner.FAILED:
-                st.failed += 1
-            else:
-                st.error += 1
-
-    with LOCK:
-        st = RUNS[run_id]
-        st.status = "finished"
-        st.finished_at = _now()
-        st.current = None
+def start_workers(n: int = MAX_WORKERS) -> None:
+    if _WORKERS:
+        return
+    for i in range(n):
+        t = threading.Thread(target=_worker, args=(f"worker-{i}",),
+                             name=f"worker-{i}", daemon=True)
+        t.start()
+        _WORKERS.append(t)
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "runs": len(RUNS)}
+    return {"ok": True, "workers": len(_WORKERS), "queue": QUEUE.qsize(),
+            "runs": store.count_runs(), "db": str(store.DB_PATH)}
 
 
-@app.post("/runs", response_model=RunState, status_code=202)
+@app.post("/runs", status_code=202)
 def create_run(req: RunReq):
-    """提交任务：立刻返回 202 + run_id，不等用例跑完。"""
-    cases = [_resolve_case(c) for c in req.cases]      # 先校验，非法直接 400
+    cases = [(c, _resolve_case(c)) for c in req.cases]     # 先校验，非法直接 400
 
-    with LOCK:
-        if req.request_id:
-            old_id = CLIENT_KEYS.get(req.request_id)
-            if old_id and old_id in RUNS:
-                return RUNS[old_id]                     # 幂等：同一个 request_id 不重复跑
-        run_id = uuid.uuid4().hex[:8]
-        RUNS[run_id] = RunState(id=run_id, status="queued", total=len(cases))
-        if req.request_id:
-            CLIENT_KEYS[req.request_id] = run_id
+    if req.request_id:                                     # 幂等：老请求直接回原 run
+        old = store.get_run_by_request(req.request_id)
+        if old:
+            return store.get_run(old["id"]) or old
 
-    EXECUTOR.submit(_execute, run_id, cases)            # 丢进线程池，立刻返回
-    return RUNS[run_id]
+    run_id = uuid.uuid4().hex[:8]
+    store.create_run(run_id, len(cases), req.request_id)
+    with _STATE_LOCK:
+        _REMAINING[run_id] = len(cases)
+
+    for seq, (label, path) in enumerate(cases, start=1):
+        QUEUE.put((run_id, seq, label, path, req.case_timeout))
+
+    return store.get_run(run_id)
 
 
 @app.get("/runs")
 def list_runs(limit: int = 20):
-    with LOCK:
-        items = sorted(RUNS.values(), key=lambda r: (r.started_at or "", r.id), reverse=True)
-    return [r.model_dump() for r in items[:limit]]
+    return store.list_runs(limit)
 
 
 @app.get("/runs/{run_id}")
 def get_run(run_id: str):
-    with LOCK:
-        st = RUNS.get(run_id)
-    if st is None:
+    run = store.get_run(run_id)
+    if run is None:
         raise HTTPException(status_code=404, detail=f"run 不存在：{run_id}")
-    return st
+    return run
+
+
+# ---- 进程启动时：恢复中断状态 + 拉起 worker ----
+store.recover_interrupted()
+start_workers()
 
 
 if __name__ == "__main__":
