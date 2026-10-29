@@ -167,3 +167,11 @@ def recent_statuses(case_name: str, limit: int = 5) -> list[str]:
         rows = c.execute("SELECT status FROM results WHERE case_name=? ORDER BY id DESC LIMIT ?",
                          (case_name, limit)).fetchall()
     return [r[0] for r in rows]
+
+def recent_case_rows(limit: int = 2000) -> list[dict]:
+    """给 Stage 7 用：最近的明细行，按 id 倒序（最新在前）。"""
+    with tx() as c:
+        rows = c.execute(
+            "SELECT id, case_name, status, message, exit_code, duration_ms, created_at "
+            "FROM results ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]

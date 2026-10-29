@@ -76,6 +76,15 @@
       </table>
     </div>
   </section>
+
+    <section class="panel" style="grid-column: 1 / -1;">
+    <h2>用例健康度 <span class="muted" id="cases-count"></span></h2>
+    <table>
+      <thead><tr><th>用例</th><th>最近 N 次</th><th>等级</th><th>归因</th><th>依据</th><th>最近一次</th></tr></thead>
+      <tbody id="case-rows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </section>
+
 </main>
 
 <script>
@@ -194,9 +203,26 @@ async function tickDetail() {
   renderDetail(run);
 }
 
+const DOT = { passed: 'ok', failed: 'bad', error: 'warn' };
+const LEVEL_LABEL = { flaky: 'flaky', broken: 'broken', stable: 'stable', insufficient: '数据不足' };
+
+async function tickCases() {
+  const rows = await getJSON('/cases?window=5');
+  document.getElementById('cases-count').textContent = `（${rows.length} 条用例）`;
+  document.getElementById('case-rows').innerHTML = rows.map((c) => `
+    <tr>
+      <td class="mono">${esc(c.case)}</td>
+      <td>${c.history.map((s) => `<span class="${DOT[s] || 'muted'}">●</span>`).join(' ')}</td>
+      <td>${badge(c.flaky)}</td>
+      <td>${esc(c.category_label || '-')}</td>
+      <td class="muted">${esc(c.reason || '-')}</td>
+      <td class="muted">${fmtTime(c.last_at)}</td>
+    </tr>`).join('') || '<tr><td colspan="6" class="muted">还没有数据</td></tr>';
+}
+
 async function loop() {
   try {
-    await Promise.all([tickHealth(), tickList(), tickDetail()]);
+        await Promise.all([tickHealth(), tickList(), tickDetail(), tickCases()]);
   } catch (e) {
     console.error(e);
   }

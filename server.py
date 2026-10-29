@@ -17,6 +17,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 import runner
+import analysis
 import store
 
 from fastapi import FastAPI, HTTPException, Request
@@ -95,6 +96,11 @@ def start_workers(n: int = MAX_WORKERS) -> None:
                              name=f"worker-{i}", daemon=True)
         t.start()
         _WORKERS.append(t)
+
+@app.get("/cases")
+def list_cases(window: int = 5):
+    """每条用例的健康度：最近 N 次结果、flaky 等级、失败归因。"""
+    return analysis.summarize_cases(store.recent_case_rows(), window)
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
