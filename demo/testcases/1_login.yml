@@ -13,6 +13,6 @@ teststeps:
     extract:
       my_token: body.data.token    # 改成 body
     validate:
-      - eq: [status_code, 200]
+      - eq: [status_code, 201]
       - eq: [body.code, 0]
       - len_eq: [body.data.token, 30] # 加上长度断言
