@@ -19,6 +19,10 @@ from pydantic import BaseModel, Field
 import runner
 import store
 
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+
 BASE_DIR = Path(__file__).resolve().parent
 DEMO_DIR = BASE_DIR / "demo"
 
@@ -26,6 +30,8 @@ MAX_WORKERS = int(os.environ.get("PLATFORM_WORKERS", "4"))
 DEFAULT_TIMEOUT = int(os.environ.get("PLATFORM_CASE_TIMEOUT", "120"))
 
 app = FastAPI(title="接口测试平台", version="0.4")
+
+TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 QUEUE: "queue.Queue" = queue.Queue()          # 队列粒度：一条用例一个任务
 _REMAINING: dict[str, int] = {}               # run_id -> 还剩几条没跑完
@@ -90,6 +96,9 @@ def start_workers(n: int = MAX_WORKERS) -> None:
         t.start()
         _WORKERS.append(t)
 
+@app.get("/", response_class=HTMLResponse)
+def index(request: Request):
+    return TEMPLATES.TemplateResponse(request=request, name="index.html", context={})
 
 @app.get("/health")
 def health():

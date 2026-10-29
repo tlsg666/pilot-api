@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>接口测试平台</title>
+<style>
+  :root { --bg:#f5f6f8; --panel:#fff; --line:#e3e6eb; --text:#1f2329; --muted:#8a919f;
+          --ok:#18a058; --bad:#d03050; --warn:#d98c1f; --run:#2080f0; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.6 "Microsoft YaHei","PingFang SC",system-ui,sans-serif; }
+  header { display:flex; align-items:baseline; gap:16px; padding:14px 20px;
+           background:#1f2329; color:#fff; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .muted { color:#9aa3af; font-size:12px; }
+  main { display:grid; grid-template-columns:minmax(360px,5fr) minmax(420px,7fr);
+         gap:16px; padding:16px 20px 40px; align-items:start; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+  .panel h2 { font-size:14px; margin:0 0 10px; font-weight:600; }
+  .muted { color:var(--muted); font-size:12px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:13px; }
+  th { color:var(--muted); font-weight:500; white-space:nowrap; }
+  tbody tr { cursor:pointer; }
+  tbody tr:hover { background:#f0f6ff; }
+  tbody tr.active { background:#e6f0ff; }
+  .mono { font-family:Consolas,"Courier New",monospace; font-size:12px; }
+  .badge { display:inline-block; padding:0 8px; border-radius:10px; font-size:12px;
+           color:#fff; background:var(--muted); }
+  .badge.done { background:var(--ok); }  .badge.run { background:var(--run); }
+  .badge.bad  { background:var(--bad); } .badge.warn { background:var(--warn); }
+  .bar { height:10px; background:#eef0f4; border-radius:6px; overflow:hidden; margin:6px 0 10px; }
+  .bar > div { height:100%; width:0; background:var(--run); transition:width .3s ease; }
+  .bar > div.has-failure { background:var(--bad); }
+  .stat { display:flex; gap:18px; flex-wrap:wrap; margin-bottom:12px; }
+  .stat b { font-weight:600; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  details summary { cursor:pointer; color:var(--muted); font-size:12px; }
+  pre { white-space:pre-wrap; word-break:break-all; background:#fafbfc; border:1px solid var(--line);
+        border-radius:6px; padding:8px; margin:6px 0 0; font-size:12px; max-height:220px; overflow:auto; }
+  #detail-empty { padding:24px 0; text-align:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>接口测试平台</h1>
+  <div class="muted" id="health">…</div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>运行列表 <span class="muted" id="runs-count"></span></h2>
+    <table>
+      <thead><tr><th>run_id</th><th>状态</th><th>进度</th><th>通过/失败/错误</th><th>创建时间</th></tr></thead>
+      <tbody id="run-rows"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>运行详情 <span class="mono muted" id="detail-id"></span></h2>
+    <div id="detail-empty" class="muted">点击左侧任意一行查看详情</div>
+
+    <div id="detail-body" hidden>
+      <div class="bar"><div id="bar-fill"></div></div>
+      <div class="stat">
+        <span>状态 <b id="s-status">-</b></span>
+        <span>进度 <b id="s-progress">0/0</b></span>
+        <span class="ok">通过 <b id="s-passed">0</b></span>
+        <span class="bad">失败 <b id="s-failed">0</b></span>
+        <span class="warn">错误 <b id="s-error">0</b></span>
+      </div>
+      <table>
+        <thead><tr><th>#</th><th>用例</th><th>状态</th><th>耗时</th><th>exit</th><th>失败信息</th></tr></thead>
+        <tbody id="result-rows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+let selected = null;
+let lastRuns = [];
+let lastListSig = '';
+let lastDetailSig = '';
+const openKeys = new Set();          // 记住哪些失败详情是展开的
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmtTime = (s) => (s ? String(s).replace('T', ' ').slice(0, 19) : '-');
+const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
+
+const BADGE = { finished: 'done', running: 'run', queued: 'wait',
+                interrupted: 'bad', passed: 'done', failed: 'bad', error: 'warn' };
+const badge = (s) => `<span class="badge ${BADGE[s] || 'wait'}">${esc(s)}</span>`;
+
+async function getJSON(url) {
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`${url} -> HTTP ${r.status}`);
+  return r.json();
+}
+
+async function tickHealth() {
+  const h = await getJSON('/health');
+  document.getElementById('health').textContent =
+    `workers=${h.workers}  排队=${h.queue}  总运行=${h.runs}`;
+}
+
+function renderRuns(runs) {
+  const tbody = document.getElementById('run-rows');
+  document.getElementById('runs-count').textContent = `（最近 ${runs.length} 条）`;
+  if (!runs.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="muted">还没有运行记录</td></tr>';
+    return;
+  }
+  tbody.innerHTML = runs.map((r) => `
+    <tr data-id="${esc(r.id)}" class="${r.id === selected ? 'active' : ''}">
+      <td class="mono">${esc(r.id)}</td>
+      <td>${badge(r.status)}</td>
+      <td>${r.finished}/${r.total}</td>
+      <td><span class="ok">${r.passed}</span> / <span class="bad">${r.failed}</span> / <span class="warn">${r.error}</span></td>
+      <td class="muted">${fmtTime(r.created_at)}</td>
+    </tr>`).join('');
+  tbody.querySelectorAll('tr[data-id]').forEach((tr) => {
+    tr.onclick = () => {
+      if (selected === tr.dataset.id) return;
+      selected = tr.dataset.id;
+      lastDetailSig = '';               // 换 run 了，强制重渲染一次
+      renderRuns(lastRuns);
+      tickDetail();
+    };
+  });
+}
+
+async function tickList() {
+  const runs = await getJSON('/runs?limit=30');
+  const sig = JSON.stringify(runs);
+  if (sig === lastListSig) return;      // 数据没变 → 不动 DOM
+  lastListSig = sig;
+  lastRuns = runs;
+  if (!selected && runs.length) selected = runs[0].id;
+  renderRuns(runs);
+}
+
+function renderDetail(run) {
+  document.getElementById('detail-empty').hidden = true;
+  document.getElementById('detail-body').hidden = false;
+  document.getElementById('detail-id').textContent = run.id;
+
+  const fill = document.getElementById('bar-fill');
+  fill.style.width = pct(run.finished, run.total) + '%';
+  fill.className = (run.failed + run.error) > 0 ? 'has-failure' : '';
+
+  document.getElementById('s-status').innerHTML = badge(run.status);
+  document.getElementById('s-progress').textContent = `${run.finished}/${run.total}`;
+  document.getElementById('s-passed').textContent = run.passed;
+  document.getElementById('s-failed').textContent = run.failed;
+  document.getElementById('s-error').textContent = run.error;
+
+  const rows = (run.results || []).map((x) => {
+    const key = `${run.id}:${x.seq}`;
+    const open = openKeys.has(key) ? ' open' : '';
+    const msg = x.message
+      ? `<details data-key="${esc(key)}"${open}><summary>${esc(x.message.slice(0, 50))}…</summary><pre>${esc(x.message)}</pre></details>`
+      : '<span class="muted">-</span>';
+    return `<tr>
+      <td class="muted">${x.seq}</td>
+      <td class="mono">${esc(x.case_name)}</td>
+      <td>${badge(x.status)}</td>
+      <td class="muted">${x.duration_ms} ms</td>
+      <td class="muted">${x.exit_code}</td>
+      <td>${msg}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('result-rows').innerHTML =
+    rows || '<tr><td colspan="6" class="muted">等待第一条结果…</td></tr>';
+
+  // 重建后重新绑定：把展开状态记下来，下次渲染时挂回去
+  document.querySelectorAll('#result-rows details[data-key]').forEach((d) => {
+    d.addEventListener('toggle', () => {
+      if (d.open) openKeys.add(d.dataset.key);
+      else openKeys.delete(d.dataset.key);
+    });
+  });
+}
+
+async function tickDetail() {
+  if (!selected) return;
+  const run = await getJSON('/runs/' + encodeURIComponent(selected));
+  const sig = JSON.stringify(run);
+  if (sig === lastDetailSig) return;    // 数据没变 → 不动 DOM，展开态与文字选中都保住
+  lastDetailSig = sig;
+  renderDetail(run);
+}
+
+async function loop() {
+  try {
+    await Promise.all([tickHealth(), tickList(), tickDetail()]);
+  } catch (e) {
+    console.error(e);
+  }
+  setTimeout(loop, 800);
+}
+
+loop();
+</script>
+</body>
+</html>
