@@ -1,0 +1,11 @@
+config:
+  name: "演示-必然失败"
+teststeps:
+  - name: "断言故意写错"
+    request:
+      method: GET
+      url: "http://127.0.0.1:8000/api/list"
+      headers:
+        token: "this_is_a_fake_token_123456789"
+    validate:
+      - eq: [status_code, 404]

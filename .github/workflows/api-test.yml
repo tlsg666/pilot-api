@@ -1,0 +1,54 @@
+name: api-test
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装 hrp（Go 引擎，二进制）
+        run: |
+          curl -sSL -o hrp.tar.gz \
+            https://github.com/httprunner/httprunner/releases/download/v4.3.6/hrp-v4.3.6-linux-amd64.tar.gz
+          tar xzf hrp.tar.gz
+          sudo install -m 755 hrp /usr/local/bin/hrp
+          hrp -v
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 启动被测服务
+        run: |
+          nohup python -m uvicorn main:app --host 127.0.0.1 --port 8000 > /tmp/sut.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf -H 'token: this_is_a_fake_token_123456789' \
+                 http://127.0.0.1:8000/api/list > /dev/null; then
+              echo "被测服务已就绪"; break
+            fi
+            sleep 1
+          done
+
+      - name: 平台自身单测
+        run: python -m pytest tests -q
+
+      - name: 质量门禁
+        run: python scripts/gate.py --json-out gate-result.json
+
+      - name: 上传门禁报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-result
+          path: gate-result.json
